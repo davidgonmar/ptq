@@ -1,14 +1,14 @@
-from ptq.quantize import quantize_llama
+from ptq.quantize import quantize_llama, QuantizationTime
 from transformers import LlamaForCausalLM, AutoTokenizer
 import torch
 import datasets
 import tqdm
 import torch.nn as nn
 
-device = "cpu"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 tiny_llama = LlamaForCausalLM.from_pretrained("TinyLlama/TinyLlama_v1.1").to(device)
 
-dataset = datasets.load_dataset("wikitext", "wikitext-2-raw-v1", split="train[:100]")
+dataset = datasets.load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
 
 tokenizer = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama_v1.1")
 
@@ -49,9 +49,24 @@ evaluator = Evaluator(dataset, tokenizer, device)
 
 nll = evaluator.evaluate(tiny_llama)
 
-quantized_llama = quantize_llama(tiny_llama, tokenizer, n_bits=8)
+quantized_llama_offline = quantize_llama(
+    tiny_llama, tokenizer, n_bits=8, quant_time=QuantizationTime.OFFLINE
+)
 
-nll_quantized = evaluator.evaluate(quantized_llama)
+nll_quantized_offline = evaluator.evaluate(quantized_llama_offline)
 
-print(f"TinyLlama NLL: {nll}")
-print(f"Quantized TinyLlama NLL: {nll_quantized}")
+del tiny_llama
+del quantized_llama_offline
+
+quantized_llama_online = quantize_llama(
+    LlamaForCausalLM.from_pretrained("TinyLlama/TinyLlama_v1.1").to(device),
+    tokenizer,
+    n_bits=8,
+    quant_time=QuantizationTime.ONLINE,
+)
+
+nll_quantized_online = evaluator.evaluate(quantized_llama_online)
+
+print(f"TinyLlama ppl: {nll}")
+print(f"Quantized TinyLlama ppl with offline activation quant: {nll_quantized_offline}")
+print(f"Quantized TinyLlama ppl with online activation quant: {nll_quantized_online}")

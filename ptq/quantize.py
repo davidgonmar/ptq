@@ -1,4 +1,9 @@
-from .symmetric import W8A8Linear, QuantizationMethod, QuantizationType
+from .symmetric import (
+    FakeW8A8Linear,
+    QuantizationMethod,
+    QuantizationType,
+    QuantizationTime,
+)
 import transformers
 from transformers.models.llama.modeling_llama import LlamaMLP, LlamaAttention
 import torch
@@ -8,6 +13,7 @@ import os
 
 QM = QuantizationMethod
 QT = QuantizationType
+QTM = QuantizationTime
 
 
 # for quantizing activations, we need to know the range of the activations.
@@ -59,6 +65,8 @@ def get_activation_range(model: torch.nn.Module, tokenizer, ds):
         hook.remove()
 
     # save the cache
+    if not os.path.exists("data"):
+        os.makedirs("data")
     torch.save((absmax_acts_inputs, absmax_acts_outputs), cache_path)
     return absmax_acts_inputs, absmax_acts_outputs
 
@@ -70,33 +78,50 @@ def quantize_llama(
     n_bits: int = 8,
     quant_method: QM = QM.ABSMAX,
     quant_type: QT = QT.PER_TENSOR,
+    quant_time: QTM = QTM.ONLINE,
 ):
     # first we need to determine scales for the weights
-    absmax_acts_inputs, absmax_acts_outputs = get_activation_range(
-        model,
-        tokenizer,
-        ds=datasets.load_dataset(
-            "Salesforce/wikitext", "wikitext-103-raw-v1", split="train[:100]"
-        ),
-    )
-    qmax = 2 ** (n_bits - 1) - 1
+    if quant_time is QTM.OFFLINE:
+        absmax_acts_inputs, absmax_acts_outputs = get_activation_range(
+            model,
+            tokenizer,
+            ds=datasets.load_dataset(
+                "wikitext", "wikitext-103-raw-v1", split="train[:100]"
+            ),
+        )
+        qmax = 2 ** (n_bits - 1) - 1
+
+        def get_input_scale(absmax):
+            return absmax / qmax
+
     for name, m in model.named_modules():
         # continue if the module is not a linear layer
         if not isinstance(m, (LlamaMLP, LlamaAttention)):
             continue
 
-        def get_input_scale(absmax):
-            return absmax / qmax
+        if quant_time is QTM.OFFLINE:
 
-        def _quant_linear(module, subname):
-            return W8A8Linear.from_linear(
-                module,
-                quant_type,
-                quant_method,
-                n_bits,
-                get_input_scale(absmax_acts_inputs[name + subname]),
-                get_input_scale(absmax_acts_outputs[name + subname]),
-            )
+            def _quant_linear(module, subname):
+                return FakeW8A8Linear.from_linear(
+                    module,
+                    quant_type,
+                    quant_method,
+                    n_bits,
+                    QTM.OFFLINE,
+                    get_input_scale(absmax_acts_inputs[name + subname]),
+                    get_input_scale(absmax_acts_outputs[name + subname]),
+                )
+
+        else:
+
+            def _quant_linear(module, subname):
+                return FakeW8A8Linear.from_linear(
+                    module,
+                    quant_type,
+                    quant_method,
+                    n_bits,
+                    QTM.ONLINE,
+                )
 
         if isinstance(m, LlamaMLP):
             m.gate_proj = _quant_linear(m.gate_proj, ".gate_proj")
